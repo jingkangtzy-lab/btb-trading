@@ -1,0 +1,22 @@
+{
+  "name": "btb-trading",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "services/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "db:migrate": "npx prisma migrate dev --schema packages/db/prisma/schema.prisma",
+    "db:seed": "ts-node packages/db/prisma/seed.ts",
+    "db:seed:test-users": "ts-node packages/db/prisma/seed-test-users.ts",
+    "test": "npm run test --workspaces --if-present",
+    "dev:customer": "npm run dev --workspace=apps/customer-web",
+    "dev:admin": "npm run dev --workspace=apps/admin-web"
+  },
+  "devDependencies": {
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.4"
+  }
+}

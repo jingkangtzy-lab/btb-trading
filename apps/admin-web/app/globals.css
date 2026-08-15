@@ -1,0 +1,32 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  background-color: #080b14;
+  color: #f4f5f7;
+}
+
+/* Signature card treatment: a clipped top-right corner, evoking a card/chip edge
+   instead of generic rounded-everything. Used sparingly, only on primary cards. */
+.clip-card {
+  clip-path: polygon(0 0, calc(100% - 20px) 0, 100% 20px, 100% 100%, 0 100%);
+  background: #111827;
+  border: 1px solid #232c3e;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+.hairline {
+  border-color: #232c3e;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

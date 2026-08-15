@@ -1,0 +1,23 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: btb
+      POSTGRES_PASSWORD: btb_dev_password
+      POSTGRES_DB: btb_trading
+    ports:
+      - "5432:5432"
+    volumes:
+      - btb_pg_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+
+volumes:
+  btb_pg_data:

@@ -1,0 +1,455 @@
+// BTB TRADING — Core Database Schema
+// Phase 2 deliverable. Run `npx prisma migrate dev` after DATABASE_URL is set.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────
+// IDENTITY & ACCESS
+// ─────────────────────────────────────────────────────────────
+
+model User {
+  id                String        @id @default(uuid())
+  email             String        @unique
+  passwordHash      String
+  emailVerifiedAt   DateTime?
+  mfaEnabled        Boolean       @default(false)
+  mfaSecret         String?       // encrypted at rest by app layer, never plaintext in logs
+  status            UserStatus    @default(ACTIVE)
+  isAdmin           Boolean       @default(false) // admin accounts are separate audience tokens; this flag never grants access alone
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  kycProfile        KYCProfile?
+  roles             UserRole[]
+  walletAddresses    WalletAddress[]
+  balanceAccounts   BalanceAccount[]
+  orders            Order[]
+  deposits          Deposit[]
+  withdrawals       Withdrawal[]
+  supportTickets    SupportTicket[]
+  referralAsReferrer Referral[]   @relation("referrer")
+  referralAsReferee  Referral?    @relation("referee")
+  adminActions      AdminAction[] @relation("operator")
+  auditLogs         AuditLog[]    @relation("actor")
+  sessions          Session[]
+
+  @@index([email])
+}
+
+enum UserStatus {
+  ACTIVE
+  FROZEN
+  PENDING_VERIFICATION
+  CLOSED
+}
+
+model Session {
+  id            String   @id @default(uuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id])
+  audience      String   // "btb-customer" | "btb-admin"
+  refreshTokenHash String @unique
+  ipAddress     String?
+  userAgent     String?
+  createdAt     DateTime @default(now())
+  expiresAt     DateTime
+  revokedAt     DateTime?
+
+  @@index([userId])
+}
+
+model Role {
+  id          String   @id @default(uuid())
+  name        String   @unique // SUPER_ADMIN, FINANCE_ADMIN, TRADING_ADMIN, CUSTOMER_SUPPORT, KYC_REVIEWER, RISK_OFFICER, AGENT_MANAGER, AUDITOR
+  description String?
+  users       UserRole[]
+  permissions RolePermission[]
+}
+
+model Permission {
+  id          String   @id @default(uuid())
+  key         String   @unique // e.g. "withdrawal:approve", "ledger:write", "audit:read"
+  description String?
+  roles       RolePermission[]
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+  role         Role       @relation(fields: [roleId], references: [id])
+  permission   Permission @relation(fields: [permissionId], references: [id])
+
+  @@id([roleId, permissionId])
+}
+
+model UserRole {
+  userId String
+  roleId String
+  user   User @relation(fields: [userId], references: [id])
+  role   Role @relation(fields: [roleId], references: [id])
+
+  @@id([userId, roleId])
+}
+
+model KYCProfile {
+  id             String     @id @default(uuid())
+  userId         String     @unique
+  user           User       @relation(fields: [userId], references: [id])
+  legalName      String?
+  dateOfBirth    DateTime?
+  country        String?
+  documentType   String?
+  documentRef    String?    // reference/ID to documents stored in a compliant document vault, never raw files in this DB
+  status         KYCStatus  @default(NOT_STARTED)
+  reviewedBy     String?
+  reviewedAt     DateTime?
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+}
+
+enum KYCStatus {
+  NOT_STARTED
+  PENDING
+  APPROVED
+  REJECTED
+  ADDITIONAL_INFO_REQUIRED
+}
+
+// ─────────────────────────────────────────────────────────────
+// ASSETS, NETWORKS, MARKETS
+// ─────────────────────────────────────────────────────────────
+
+model Asset {
+  id          String   @id @default(uuid())
+  symbol      String   @unique // BTC, ETH, USDT...
+  name        String
+  decimals    Int
+  isActive    Boolean  @default(true)
+  walletAddresses WalletAddress[]
+  balanceAccounts BalanceAccount[]
+}
+
+model Network {
+  id          String   @id @default(uuid())
+  code        String   @unique // "BTC", "ERC20", "TRC20"...
+  name        String
+  isActive    Boolean  @default(true)
+  walletAddresses WalletAddress[]
+}
+
+model WalletAddress {
+  id            String   @id @default(uuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id])
+  assetId       String
+  asset         Asset    @relation(fields: [assetId], references: [id])
+  networkId     String
+  network       Network  @relation(fields: [networkId], references: [id])
+  address       String
+  memoTag       String?
+  providerRef   String   // reference ID from the custody/wallet provider, never a raw private key
+  createdAt     DateTime @default(now())
+
+  @@index([userId])
+  @@unique([userId, assetId, networkId])
+}
+
+model Market {
+  id             String   @id @default(uuid())
+  symbol         String   @unique // "BTC-USDT"
+  baseAssetId    String
+  quoteAssetId   String
+  status         MarketStatus @default(OPEN)
+  minOrderSize   Decimal  @db.Decimal(36, 18)
+  makerFeeBps    Int      @default(10) // basis points
+  takerFeeBps    Int      @default(20)
+  orders         Order[]
+}
+
+enum MarketStatus {
+  OPEN
+  HALTED
+  DELISTED
+}
+
+// ─────────────────────────────────────────────────────────────
+// TRADING: ORDER -> TRADE -> POSITION
+// ─────────────────────────────────────────────────────────────
+
+model Order {
+  id             String      @id @default(uuid())
+  idempotencyKey String      @unique
+  userId         String
+  user           User        @relation(fields: [userId], references: [id])
+  marketId       String
+  market         Market      @relation(fields: [marketId], references: [id])
+  side           OrderSide
+  type           OrderType
+  amount         Decimal     @db.Decimal(36, 18)
+  status         OrderStatus @default(PENDING)
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  trade          Trade?
+
+  @@index([userId])
+  @@index([marketId])
+}
+
+enum OrderSide {
+  BUY
+  SELL
+}
+
+enum OrderType {
+  MARKET
+  LIMIT
+}
+
+enum OrderStatus {
+  PENDING
+  FILLED
+  REJECTED
+  CANCELLED
+}
+
+// Trade = immutable execution record. Never updated after creation.
+model Trade {
+  id              String   @id @default(uuid())
+  orderId         String   @unique
+  order           Order    @relation(fields: [orderId], references: [id])
+  executionPrice  Decimal  @db.Decimal(36, 18) // sourced ONLY from Market Data Service's validated tick
+  priceSourceRef  String   // tick ID / timestamp reference for audit
+  feeAmount       Decimal  @db.Decimal(36, 18)
+  feeAssetId      String
+  executedAt      DateTime @default(now())
+
+  position        Position?
+}
+
+model Position {
+  id            String    @id @default(uuid())
+  tradeId       String    @unique
+  trade         Trade     @relation(fields: [tradeId], references: [id])
+  status        PositionStatus @default(OPEN)
+  openPrice     Decimal   @db.Decimal(36, 18)
+  closePrice    Decimal?  @db.Decimal(36, 18)
+  realizedPnl   Decimal?  @db.Decimal(36, 18)
+  openedAt      DateTime  @default(now())
+  closedAt      DateTime?
+}
+
+enum PositionStatus {
+  OPEN
+  CLOSED
+}
+
+// ─────────────────────────────────────────────────────────────
+// LEDGER (SOURCE OF TRUTH FOR BALANCES)
+// ─────────────────────────────────────────────────────────────
+
+model BalanceAccount {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+  assetId     String
+  asset       Asset    @relation(fields: [assetId], references: [id])
+  // cached projection only — always recomputable from LedgerEntry
+  cachedBalance Decimal @db.Decimal(36, 18) @default(0)
+  updatedAt   DateTime @updatedAt
+
+  ledgerEntries LedgerEntry[]
+
+  @@unique([userId, assetId])
+}
+
+model LedgerEntry {
+  id              String   @id @default(uuid())
+  accountId       String
+  account         BalanceAccount @relation(fields: [accountId], references: [id])
+  amount          Decimal  @db.Decimal(36, 18) // positive = credit, negative = debit
+  type            LedgerEntryType
+  referenceType   LedgerReferenceType
+  referenceId     String   // FK to Deposit/Withdrawal/Trade/AdminAction/etc, resolved by referenceType
+  // Groups the (usually two) entries that make up one balanced double-entry
+  // posting, e.g. "debit customer / credit fee account" for a single trade.
+  postingGroupId  String
+  // Unique per logical operation attempt so retries can never double-post.
+  // Convention: `${referenceType}:${referenceId}:${accountId}`
+  idempotencyKey  String   @unique
+  createdAt       DateTime @default(now())
+  createdBy       String   // userId or "system"
+
+  @@index([accountId])
+  @@index([referenceType, referenceId])
+  @@index([postingGroupId])
+}
+
+enum LedgerEntryType {
+  DEBIT
+  CREDIT
+}
+
+enum LedgerReferenceType {
+  BLOCKCHAIN_DEPOSIT
+  WITHDRAWAL
+  TRADE_SETTLEMENT
+  TRADING_FEE
+  MANUAL_ADJUSTMENT
+  REFERRAL_COMMISSION
+  REFUND
+  TRANSFER
+}
+
+// ─────────────────────────────────────────────────────────────
+// DEPOSITS / WITHDRAWALS
+// ─────────────────────────────────────────────────────────────
+
+model Deposit {
+  id              String        @id @default(uuid())
+  userId          String
+  user            User          @relation(fields: [userId], references: [id])
+  assetId         String
+  networkId       String
+  amount          Decimal       @db.Decimal(36, 18)
+  txHash          String        @unique
+  confirmations   Int           @default(0)
+  requiredConfirmations Int
+  status          DepositStatus @default(PENDING)
+  creditedAt      DateTime?
+  createdAt       DateTime      @default(now())
+}
+
+enum DepositStatus {
+  PENDING
+  CONFIRMED
+  CREDITED
+  FAILED
+}
+
+model Withdrawal {
+  id                String            @id @default(uuid())
+  userId            String
+  user              User              @relation(fields: [userId], references: [id])
+  assetId           String
+  networkId         String
+  destinationAddress String
+  amount            Decimal           @db.Decimal(36, 18)
+  feeAmount         Decimal           @db.Decimal(36, 18)
+  status            WithdrawalStatus  @default(PENDING_REVIEW)
+  requiresSecondApproval Boolean      @default(false)
+  approvedBy        String?
+  secondApprovedBy  String?
+  rejectedReason    String?
+  txHash            String?
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+}
+
+enum WithdrawalStatus {
+  PENDING_REVIEW
+  ADDITIONAL_VERIFICATION_REQUIRED
+  APPROVED
+  REJECTED
+  BROADCASTING
+  COMPLETED
+  FAILED
+}
+
+// ─────────────────────────────────────────────────────────────
+// REFERRALS
+// ─────────────────────────────────────────────────────────────
+
+model Referral {
+  id          String   @id @default(uuid())
+  referrerId  String
+  referrer    User     @relation("referrer", fields: [referrerId], references: [id])
+  refereeId   String   @unique
+  referee     User     @relation("referee", fields: [refereeId], references: [id])
+  code        String
+  createdAt   DateTime @default(now())
+
+  commissions Commission[]
+}
+
+model Commission {
+  id          String   @id @default(uuid())
+  referralId  String
+  referral    Referral @relation(fields: [referralId], references: [id])
+  amount      Decimal  @db.Decimal(36, 18)
+  assetId     String
+  status      String   @default("PENDING") // PENDING | PAID
+  createdAt   DateTime @default(now())
+}
+
+// ─────────────────────────────────────────────────────────────
+// SUPPORT
+// ─────────────────────────────────────────────────────────────
+
+model SupportTicket {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  subject   String
+  status    String   @default("OPEN")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ─────────────────────────────────────────────────────────────
+// ADMIN ACTIONS & AUDIT (append-only)
+// ─────────────────────────────────────────────────────────────
+
+model AdminAction {
+  id            String   @id @default(uuid())
+  operatorId    String
+  operator      User     @relation("operator", fields: [operatorId], references: [id])
+  actionType    String   // "MANUAL_BALANCE_ADJUSTMENT", "WITHDRAWAL_APPROVAL", "ACCOUNT_FREEZE", ...
+  targetUserId  String?
+  reason        String
+  referenceNumber String
+  requiresSecondApproval Boolean @default(false)
+  approvedBySecond String?
+  metadata      Json?
+  createdAt     DateTime @default(now())
+
+  @@index([operatorId])
+  @@index([targetUserId])
+}
+
+// Insert-only at the application DB-role level (no UPDATE/DELETE grants).
+model AuditLog {
+  id           String   @id @default(uuid())
+  actorId      String?
+  actor        User?    @relation("actor", fields: [actorId], references: [id])
+  role         String?
+  action       String
+  targetType   String?
+  targetId     String?
+  previousValue Json?
+  newValue     Json?
+  ipAddress    String?
+  requestId    String
+  createdAt    DateTime @default(now())
+
+  @@index([actorId])
+  @@index([targetType, targetId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// SYSTEM SETTINGS
+// ─────────────────────────────────────────────────────────────
+
+model SystemSetting {
+  key       String   @id
+  value     Json
+  updatedBy String
+  updatedAt DateTime @updatedAt
+}
