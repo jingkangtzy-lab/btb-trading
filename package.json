@@ -2,11 +2,6 @@
   "name": "btb-trading",
   "version": "0.1.0",
   "private": true,
-  "workspaces": [
-    "apps/*",
-    "services/*",
-    "packages/*"
-  ],
   "scripts": {
     "db:migrate": "npx prisma migrate dev --schema packages/db/prisma/schema.prisma",
     "db:seed": "ts-node packages/db/prisma/seed.ts",
